@@ -1,0 +1,101 @@
+x-airflow-common: &airflow-common
+  build: .                          # ← build from Dockerfile instead of pulling image
+  environment:
+    - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+    - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://postgres:pielly16@postgres:5432/airflow_metadata
+    - AIRFLOW__CORE__FERNET_KEY=gRZ7CINBvmDiZv6yIdhur3xU0NsRtoZX43HgL7XNBv4=
+    - AIRFLOW__CORE__LOAD_EXAMPLES=false
+    - AIRFLOW_CONN_MYSQL_STAGING=mysql://staging_user:staging_pass@mysql-staging:3306/flight_staging
+    - AIRFLOW_CONN_POSTGRES_ANALYTICS=postgresql://postgres:pielly16@postgres:5432/flight_analytics_bd
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./scripts:/opt/airflow/scripts
+    - ./data:/opt/airflow/data
+    - ./sql:/opt/airflow/sql
+    - ./requirements.txt:/opt/airflow/requirements.txt   # ← mount requirements.txt
+  networks:
+    - internal
+  depends_on:
+    postgres:
+      condition: service_healthy
+    mysql-staging:
+      condition: service_healthy
+
+services:
+
+  # ── Postgres (all databases) ──────────────────────────────────────────────
+  postgres:
+    image: postgres:15
+    container_name: my-postgres-container
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: pielly16
+      POSTGRES_DB: flight_analytics_bd   # default db created by postgres image
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql/init_postgres.sql:/docker-entrypoint-initdb.d/init_postgres.sql        # ← shell script
+      - ./sql/postgres_analytics_schema.sql:/docker-entrypoint-initdb.d/analytics_schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      retries: 5
+      start_period: 10s
+    networks:
+      - internal
+
+  # ── Staging DB (MySQL) ────────────────────────────────────────────────────
+  mysql-staging:
+    image: mysql:8.0
+    container_name: mysql-staging
+    environment:
+      MYSQL_ROOT_PASSWORD: root_pass
+      MYSQL_DATABASE: flight_staging
+      MYSQL_USER: staging_user
+      MYSQL_PASSWORD: staging_pass
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_staging_data:/var/lib/mysql
+      - ./sql/mysql_staging_schema.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      retries: 5
+      start_period: 20s
+    networks:
+      - internal
+
+  # ── Airflow init (run once) ───────────────────────────────────────────────
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow-init
+    command: bash -c "airflow db init && airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com"
+
+
+  # ── Airflow webserver ─────────────────────────────────────────────────────
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: airflow-webserver
+    command: webserver
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  # ── Airflow scheduler ─────────────────────────────────────────────────────
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow-scheduler
+    command: scheduler
+    restart: unless-stopped
+
+# ── Networks ──────────────────────────────────────────────────────────────
+networks:
+  internal:
+    driver: bridge
+
+# ── Volumes ───────────────────────────────────────────────────────────────
+volumes:
+  postgres_data:
+  mysql_staging_data:
